@@ -2,27 +2,29 @@ import time
 import random
 import requests
 import pandas as pd
-import ta  # Technical Analysis Library in Python
+import ta
 
 # --- 1. CONFIGURATION & FETCH PAIRS ---
-def get_pionex_pairs():
-    url = "https://api.pionex.com/api/v1/market/symbols"
+def get_bybit_pairs(session):
+    url = "https://api.bybit.com/v5/market/tickers?category=spot"
     try:
-        resp = requests.get(url, timeout=10).json()
-        if resp.get("result"):
-            symbols = [item["symbol"] for item in resp["data"]["symbols"] if item["symbol"].endswith("_USDT")]
-            return set(s.replace("_", "") for s in symbols)
+        resp = session.get(url, timeout=10).json()
+        if resp.get("retCode") == 0:
+            list_data = resp["result"]["list"]
+            symbols = [item["symbol"] for item in list_data if item["symbol"].endswith("USDT")]
+            return set(symbols)
     except Exception as e:
-        print(f"[WARN] Gagal mengambil data Pionex: {e}")
+        print(f"[WARN] Gagal mengambil data Bybit: {e}")
     return set()
 
-def get_binance_usdt_pairs():
+def get_binance_usdt_pairs(session):
     url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
-        resp = requests.get(url, timeout=10).json()
+        resp = session.get(url, timeout=10).json()
         pairs = []
         for item in resp:
             symbol = item["symbol"]
+            # Ambil pair USDT, hindari leveraged/stablecoins
             if symbol.endswith("USDT") and not any(x in symbol for x in ["UPUSDT", "DOWNUSDT", "BUSD", "FDUSD", "TUSD", "USDC"]):
                 pairs.append({
                     "symbol": symbol,
@@ -75,7 +77,6 @@ def analyze_coin(symbol, session):
         # 3. Bollinger Bands (20, 2)
         bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
         latest_bb_lower = bb.bollinger_lband().iloc[-1]
-        latest_bb_upper = bb.bollinger_hband().iloc[-1]
 
         # 4. Stochastic RSI (14, 3, 3)
         stoch_rsi_k = ta.momentum.stochrsi_k(df["close"], window=14, smooth1=3, smooth2=3) * 100
@@ -83,7 +84,7 @@ def analyze_coin(symbol, session):
         stoch_k = stoch_rsi_k.iloc[-1] if not pd.isna(stoch_rsi_k.iloc[-1]) else 50.0
         stoch_d = stoch_rsi_d.iloc[-1] if not pd.isna(stoch_rsi_d.iloc[-1]) else 50.0
 
-        # 5. Deteksi Whale Activity (Volume Spike & Volume SMA)
+        # 5. Deteksi Whale Activity (Volume Spike)
         df["vol_sma"] = df["volume"].rolling(window=20).mean()
         last_vol = df["volume"].iloc[-1]
         avg_vol = df["vol_sma"].iloc[-1]
@@ -132,7 +133,7 @@ def analyze_coin(symbol, session):
         final_rate = min(10.0, base_rate + whale_score_bonus)
 
         # Parameter Trade Scalping
-        entry_price = last_price * 1.002  # Slippage Pionex ~0.2%
+        entry_price = last_price * 1.001  # Slippage Binance/Bybit ~0.1%
         tp_percent = 3.0 if final_rate >= 8.0 else 2.0
         sl_percent = 1.0 if final_rate >= 8.0 else 1.5
 
@@ -142,10 +143,10 @@ def analyze_coin(symbol, session):
         # Rangkuman Indikator Scalping
         scalping_signals = []
         if ema_bullish: scalping_signals.append("EMA 9 > EMA 21 (Bullish Trend)")
-        if last_price <= latest_bb_lower * 1.005: scalping_signals.append("Near Lower Bollinger Band")
+        if last_price <= latest_bb_lower * 1.005: scalping_signals.append("Near Lower BB")
         if stoch_k < 30: scalping_signals.append(f"StochRSI Oversold (K:{stoch_k:.1f})")
-        if is_bullish_engulfing: scalping_signals.append("Bullish Engulfing Pattern")
-        if is_hammer: scalping_signals.append("Hammer Reversal Pattern")
+        if is_bullish_engulfing: scalping_signals.append("Bullish Engulfing")
+        if is_hammer: scalping_signals.append("Hammer Pattern")
 
         return {
             "symbol": symbol,
@@ -165,23 +166,23 @@ def analyze_coin(symbol, session):
             "volatility_7d": round(volatility_7d, 2)
         }
 
-    except Exception as e:
+    except Exception:
         return None
 
 # --- 3. MAIN WORKFLOW ---
 def main():
     print("="*85)
-    print("   BOT SCOUTING CRYPTO SCALPING (15M / 7-DAY CANDLE) - BINANCE / PIONEX SCANNER")
+    print("   BOT SCOUTING CRYPTO SCALPING (15M / 7-DAY CANDLE) - BINANCE / BYBIT SCANNER")
     print("="*85)
 
     session = requests.Session()
 
-    print("[1/4] Mengambil daftar pair dari Pionex...")
-    pionex_pairs = get_pionex_pairs()
-    print(f"      Total pair Pionex terdeteksi: {len(pionex_pairs)}")
+    print("[1/4] Mengambil daftar pair dari Bybit...")
+    bybit_pairs = get_bybit_pairs(session)
+    print(f"      Total pair Bybit terdeteksi: {len(bybit_pairs)}")
 
     print("[2/4] Mengambil daftar pair USDT dari Binance...")
-    all_binance_pairs = get_binance_usdt_pairs()
+    all_binance_pairs = get_binance_usdt_pairs(session)
     print(f"      Total pair Binance terdeteksi: {len(all_binance_pairs)}")
 
     # Acak dan ambil maksimal 300 koin
@@ -195,25 +196,25 @@ def main():
     for idx, coin in enumerate(scanned_pool):
         symbol = coin["symbol"]
         
-        # Filter Match Pionex
-        if pionex_pairs and symbol not in pionex_pairs:
-            continue
+        # Cross-check ketersediaan pair di Bybit (bila data tersedia)
+        is_in_bybit = symbol in bybit_pairs if bybit_pairs else True
 
         # Analisis Teknikal Scalping
         analysis = analyze_coin(symbol, session)
         if analysis:
             analysis["24h_vol_usd"] = coin["volume_usd"]
             analysis["24h_change"] = coin["price_change"]
+            analysis["bybit_status"] = "MATCHED (Tersedia)" if is_in_bybit else "BINANCE ONLY"
             results.append(analysis)
 
-        # Rate Limiting Delay
         time.sleep(0.05)
 
     # Urutkan berdasarkan Rating tertinggi
     results = sorted(results, key=lambda x: x["rate"], reverse=True)
 
     # --- REPORT PRINTING ---
-    print("\n" + "="*85)
+    print("
+" + "="*85)
     print(f" HASIL LAPORAN SCOUTING SCALPING (Total Lolos Filter: {len(results)})")
     print("="*85)
 
@@ -223,9 +224,9 @@ def main():
 
     for item in results:
         print(f"► PAIR KOIN          : {item['symbol']}")
-        print(f"  Pionex Status      : MATCHED (Tersedia di Pionex)")
+        print(f"  Exchange Status    : Binance (Main) | Bybit: {item['bybit_status']}")
         print(f"  Harga Pasar        : {item['price']}")
-        print(f"  Est. Open Position : {item['entry_price']} (Toleransi Slippage ~0.2%)")
+        print(f"  Est. Open Position : {item['entry_price']} (Toleransi Slippage ~0.1%)")
         print(f"  RSI (14 - 15M)     : {item['rsi']} (Rentang 30 - 70)")
         print(f"  StochRSI (K/D)     : {item['stoch_k']} / {item['stoch_d']}")
         print(f"  Tren EMA Scalping  : {item['ema_signal']}")
