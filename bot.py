@@ -2,7 +2,7 @@ import time
 import random
 import requests
 import pandas as pd
-import pandas_ta as ta
+import ta  # Technical Analysis Library in Python
 
 # --- 1. CONFIGURATION & FETCH PAIRS ---
 def get_pionex_pairs():
@@ -35,11 +35,11 @@ def get_binance_usdt_pairs():
         return []
 
 # --- 2. SCALPING TECHNICAL ANALYSIS & WHALE DETECTION ---
-def analyze_coin(symbol):
+def analyze_coin(symbol, session):
     # Fetch 7 hari data kandel 15m -> 7 * 24 * 4 = 672 kandel (limit 700)
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=700"
     try:
-        resp = requests.get(url, timeout=5)
+        resp = session.get(url, timeout=5)
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -58,40 +58,32 @@ def analyze_coin(symbol):
         df["volume"] = df["volume"].astype(float)
 
         # 1. RSI (14)
-        df["rsi"] = ta.rsi(df["close"], length=14)
-        latest_rsi = df["rsi"].iloc[-1]
+        rsi_series = ta.momentum.rsi(df["close"], window=14)
+        latest_rsi = rsi_series.iloc[-1]
 
         # Filter RSI fleksibel (30 - 70)
         if pd.isna(latest_rsi) or not (30 <= latest_rsi <= 70):
             return None
 
         # 2. EMA Scalping (EMA 9 & EMA 21)
-        df["ema9"] = ta.ema(df["close"], length=9)
-        df["ema21"] = ta.ema(df["close"], length=21)
+        df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
+        df["ema21"] = ta.trend.ema_indicator(df["close"], window=21)
         latest_ema9 = df["ema9"].iloc[-1]
         latest_ema21 = df["ema21"].iloc[-1]
         ema_bullish = latest_ema9 > latest_ema21
 
         # 3. Bollinger Bands (20, 2)
-        bb = ta.bbands(df["close"], length=20, std=2)
-        if bb is not None:
-            df["bb_lower"] = bb["BBL_20_2.0"]
-            df["bb_upper"] = bb["BBU_20_2.0"]
-            latest_bb_lower = df["bb_lower"].iloc[-1]
-            latest_bb_upper = df["bb_upper"].iloc[-1]
-        else:
-            latest_bb_lower = df["low"].iloc[-1]
-            latest_bb_upper = df["high"].iloc[-1]
+        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
+        latest_bb_lower = bb.bollinger_lband().iloc[-1]
+        latest_bb_upper = bb.bollinger_hband().iloc[-1]
 
-        # 4. Stochastic RSI (14, 14, 3, 3)
-        stoch_rsi = ta.stochrsi(df["close"], length=14, rsi_length=14, k=3, d=3)
-        if stoch_rsi is not None:
-            stoch_k = stoch_rsi["STOCHRSIk_14_14_3_3"].iloc[-1]
-            stoch_d = stoch_rsi["STOCHRSId_14_14_3_3"].iloc[-1]
-        else:
-            stoch_k, stoch_d = 50.0, 50.0
+        # 4. Stochastic RSI (14, 3, 3)
+        stoch_rsi_k = ta.momentum.stochrsi_k(df["close"], window=14, smooth1=3, smooth2=3) * 100
+        stoch_rsi_d = ta.momentum.stochrsi_d(df["close"], window=14, smooth1=3, smooth2=3) * 100
+        stoch_k = stoch_rsi_k.iloc[-1] if not pd.isna(stoch_rsi_k.iloc[-1]) else 50.0
+        stoch_d = stoch_rsi_d.iloc[-1] if not pd.isna(stoch_rsi_d.iloc[-1]) else 50.0
 
-        # 5. Deteksi Whale Activity (Volume Spike & Taker Buy Ratio)
+        # 5. Deteksi Whale Activity (Volume Spike & Volume SMA)
         df["vol_sma"] = df["volume"].rolling(window=20).mean()
         last_vol = df["volume"].iloc[-1]
         avg_vol = df["vol_sma"].iloc[-1]
@@ -120,25 +112,20 @@ def analyze_coin(symbol):
         volatility_7d = ((df["high"].tail(672).max() - df["low"].tail(672).min()) / last_price) * 100
 
         base_rate = 5.0
-        # Poin RSI oversold/accumulation
         if 30 <= latest_rsi <= 45:
             base_rate += 1.5
         elif 45 < latest_rsi <= 60:
             base_rate += 0.5
 
-        # Poin EMA Cross Bullish
         if ema_bullish:
             base_rate += 1.0
 
-        # Poin Bounce Bollinger Band Bawah
         if last_price <= latest_bb_lower * 1.005:
             base_rate += 1.0
 
-        # Poin Candlestick Reversal
         if is_bullish_engulfing or is_hammer:
             base_rate += 1.0
 
-        # Poin Stochastic RSI Oversold
         if stoch_k < 30 and stoch_d < 30:
             base_rate += 0.5
 
@@ -152,7 +139,7 @@ def analyze_coin(symbol):
         take_profit = entry_price * (1 + (tp_percent / 100))
         stop_loss = entry_price * (1 - (sl_percent / 100))
 
-        # Rangkuman Indikator Scalping untuk Laporan
+        # Rangkuman Indikator Scalping
         scalping_signals = []
         if ema_bullish: scalping_signals.append("EMA 9 > EMA 21 (Bullish Trend)")
         if last_price <= latest_bb_lower * 1.005: scalping_signals.append("Near Lower Bollinger Band")
@@ -178,7 +165,7 @@ def analyze_coin(symbol):
             "volatility_7d": round(volatility_7d, 2)
         }
 
-    except Exception:
+    except Exception as e:
         return None
 
 # --- 3. MAIN WORKFLOW ---
@@ -186,6 +173,8 @@ def main():
     print("="*85)
     print("   BOT SCOUTING CRYPTO SCALPING (15M / 7-DAY CANDLE) - BINANCE / PIONEX SCANNER")
     print("="*85)
+
+    session = requests.Session()
 
     print("[1/4] Mengambil daftar pair dari Pionex...")
     pionex_pairs = get_pionex_pairs()
@@ -211,21 +200,20 @@ def main():
             continue
 
         # Analisis Teknikal Scalping
-        analysis = analyze_coin(symbol)
+        analysis = analyze_coin(symbol, session)
         if analysis:
             analysis["24h_vol_usd"] = coin["volume_usd"]
             analysis["24h_change"] = coin["price_change"]
             results.append(analysis)
 
         # Rate Limiting Delay
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     # Urutkan berdasarkan Rating tertinggi
     results = sorted(results, key=lambda x: x["rate"], reverse=True)
 
     # --- REPORT PRINTING ---
-    print("
-" + "="*85)
+    print("\n" + "="*85)
     print(f" HASIL LAPORAN SCOUTING SCALPING (Total Lolos Filter: {len(results)})")
     print("="*85)
 
