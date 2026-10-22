@@ -8,6 +8,7 @@ on:
 jobs:
   scout:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
