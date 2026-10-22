@@ -213,8 +213,8 @@ def main():
     results = sorted(results, key=lambda x: x["rate"], reverse=True)
 
     # --- REPORT PRINTING ---
-    print("
-" + "="*85)
+    print("")
+    print("="*85)
     print(f" HASIL LAPORAN SCOUTING SCALPING (Total Lolos Filter: {len(results)})")
     print("="*85)
 
