@@ -17,7 +17,6 @@ PASSING_SCORE = 50            # Threshold skor passing grade dilonggarkan ke 50%
 
 BINANCE_REST_24HR = "https://api.binance.com/api/v3/ticker/24hr"
 BYBIT_REST_24HR = "https://api.bybit.com/v5/market/tickers"
-COINGECKO_MARKETS_API = "https://api.coingecko.com/api/v3/coins/markets"
 
 def fetch_market_data():
     """Mengambil data pasar secara cepat dan menggabungkannya"""
@@ -122,7 +121,7 @@ def send_telegram_alert(message):
             logging.error(f"Failed to send Telegram alert: {e}")
 
 def run_scouting_bot():
-    logging.info("========== STARTING CRYPTO SCOUTING BOT V7 ==========")
+    logging.info("========== STARTING CRYPTO SCOUTING BOT V8 ==========")
     
     # Step 1: Market Fetching
     candidate_coins = fetch_market_data()
