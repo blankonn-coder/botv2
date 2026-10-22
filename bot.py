@@ -1,3 +1,4 @@
+import os
 import time
 import random
 import requests
@@ -202,6 +203,102 @@ def analyze_coin(symbol, session):
     except Exception:
         return None
 
+# --- 4. DISCORD WEBHOOK ---
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+DISCORD_MAX_ALERTS = int(os.getenv("DISCORD_MAX_ALERTS", "10"))   # jumlah koin teratas yang dikirim
+DISCORD_MIN_RATE = float(os.getenv("DISCORD_MIN_RATE", "0"))      # rating minimum untuk dikirim
+
+def fmt_price(x):
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if x >= 1:
+        return f"{x:,.4f}"
+    return f"{x:.8f}".rstrip("0").rstrip(".") or "0"
+
+def build_embed(item):
+    rate = item["rate"]
+    if rate >= 8.0:
+        color = 0x2ECC71   # hijau
+    elif rate >= 6.0:
+        color = 0xF1C40F   # kuning
+    else:
+        color = 0x95A5A6   # abu-abu
+
+    def field(name, value, inline=True):
+        # Batas Discord: value field maks 1024 karakter
+        return {"name": name, "value": str(value)[:1024], "inline": inline}
+
+    return {
+        "title": f"{item['symbol']}  •  Rating {rate}/10",
+        "color": color,
+        "fields": [
+            field("Harga Pasar", fmt_price(item["price"])),
+            field("Est. Entry", fmt_price(item["entry_price"])),
+            field("Take Profit", f"{fmt_price(item['tp'])} (+{item['tp_pct']}%)"),
+            field("Stop Loss", f"{fmt_price(item['sl'])} (-{item['sl_pct']}%)"),
+            field("RSI (14)", item["rsi"]),
+            field("StochRSI K / D", f"{item['stoch_k']} / {item['stoch_d']}"),
+            field("Tren EMA", item["ema_signal"]),
+            field("Whale", item["whale_detected"]),
+            field("Volatilitas 7D", f"{item['volatility_7d']}%"),
+            field("Perubahan 24H", f"{item['24h_change']}%"),
+            field("Volume 24H", f"${item['24h_vol_usd']:,.0f}"),
+            field("Bybit", item["bybit_status"]),
+            field("Sinyal", item["signals"], inline=False),
+        ],
+        "footer": {"text": "Scalping scout - bukan saran finansial"},
+    }
+
+def _post_discord(payload):
+    for _ in range(3):
+        try:
+            resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+            if resp.status_code in (200, 204):
+                return True
+            if resp.status_code == 429:
+                try:
+                    wait = float(resp.json().get("retry_after", 1))
+                except Exception:
+                    wait = 1.0
+                time.sleep(wait + 0.5)
+                continue
+            print(f"[WARN] Discord menolak pesan ({resp.status_code}): {resp.text[:200]}")
+            return False
+        except Exception as e:
+            print(f"[WARN] Gagal mengirim ke Discord: {e}")
+            time.sleep(2)
+    return False
+
+def send_discord_report(results, scanned_count):
+    if not DISCORD_WEBHOOK_URL:
+        print("[INFO] DISCORD_WEBHOOK_URL belum di-set, notifikasi Discord dilewati.")
+        return False
+
+    picks = [r for r in results if r["rate"] >= DISCORD_MIN_RATE][:DISCORD_MAX_ALERTS]
+    if not picks:
+        print("[INFO] Tidak ada koin yang memenuhi syarat untuk dikirim ke Discord.")
+        return False
+
+    header = (f"**Scalping Scout** - {len(results)} koin lolos filter dari "
+              f"{scanned_count} yang dipindai. Menampilkan {len(picks)} teratas.")
+    embeds = [build_embed(p) for p in picks]
+
+    all_ok = True
+    # Discord membatasi 10 embed per pesan
+    for i in range(0, len(embeds), 10):
+        payload = {"embeds": embeds[i:i + 10]}
+        if i == 0:
+            payload["content"] = header
+        if not _post_discord(payload):
+            all_ok = False
+        time.sleep(0.5)
+
+    if all_ok:
+        print(f"[OK] {len(picks)} koin terkirim ke Discord.")
+    return all_ok
+
 # --- 3. MAIN WORKFLOW ---
 def main():
     print("="*85)
@@ -249,6 +346,8 @@ def main():
         time.sleep(0.05)
 
     results = sorted(results, key=lambda x: x["rate"], reverse=True)
+
+    send_discord_report(results, len(scanned_pool))
 
     print("")
     print("="*85)
