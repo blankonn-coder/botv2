@@ -4,12 +4,13 @@ import requests
 import pandas as pd
 import ta
 
-# Standard User-Agent Header agar tidak diblokir/diberi halaman HTML Cloudflare oleh API
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9"
 }
 
-# --- 1. CONFIGURATION & FETCH PAIRS ---
+# --- 1. FETCH ALL PAIRS FROM MULTIPLE SOURCES WITH FALLBACK ---
 def get_bybit_pairs(session):
     url = "https://api.bybit.com/v5/market/tickers?category=spot"
     try:
@@ -25,39 +26,62 @@ def get_bybit_pairs(session):
     return set()
 
 def get_binance_usdt_pairs(session):
-    url = "https://api.binance.com/api/v3/ticker/24hr"
-    try:
-        resp = session.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            pairs = []
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and "symbol" in item:
-                        symbol = item["symbol"]
-                        if symbol.endswith("USDT") and not any(x in symbol for x in ["UPUSDT", "DOWNUSDT", "BUSD", "FDUSD", "TUSD", "USDC"]):
-                            pairs.append({
-                                "symbol": symbol,
-                                "volume_usd": float(item.get("quoteVolume", 0)),
-                                "price_change": float(item.get("priceChangePercent", 0))
-                            })
-                return pairs
-    except Exception as e:
-        print(f"[ERROR] Gagal mengambil data Binance Tickers: {e}")
+    # Coba beberapa domain resmi Binance untuk menghindari IP block di runner cloud
+    urls = [
+        "https://api.binance.com/api/v3/ticker/24hr",
+        "https://api1.binance.com/api/v3/ticker/24hr",
+        "https://api2.binance.com/api/v3/ticker/24hr",
+        "https://api3.binance.com/api/v3/ticker/24hr",
+        "https://data-api.binance.vision/api/v3/ticker/24hr"  # Public Public Mirror
+    ]
+    
+    for url in urls:
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                pairs = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and "symbol" in item:
+                            symbol = item["symbol"]
+                            if symbol.endswith("USDT") and not any(x in symbol for x in ["UPUSDT", "DOWNUSDT", "BUSD", "FDUSD", "TUSD", "USDC"]):
+                                pairs.append({
+                                    "symbol": symbol,
+                                    "volume_usd": float(item.get("quoteVolume", 0)),
+                                    "price_change": float(item.get("priceChangePercent", 0))
+                                })
+                    if pairs:
+                        print(f"      Berhasil mengambil data via: {url.split('/')[2]}")
+                        return pairs
+        except Exception:
+            continue
     return []
 
 # --- 2. SCALPING TECHNICAL ANALYSIS & WHALE DETECTION ---
 def analyze_coin(symbol, session):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=700"
+    urls = [
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=700",
+        f"https://api1.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=700",
+        f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=15m&limit=700"
+    ]
+    
+    data = None
+    for url in urls:
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=5)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                if isinstance(res_data, list) and len(res_data) >= 200:
+                    data = res_data
+                    break
+        except Exception:
+            continue
+
+    if not data:
+        return None
+
     try:
-        resp = session.get(url, headers=HEADERS, timeout=5)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        if not isinstance(data, list) or len(data) < 200:
-            return None
-        
-        # Format Data Frame
         df = pd.DataFrame(data, columns=[
             "open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_volume", "trades", "taker_base", "taker_quote", "ignore"
@@ -142,7 +166,7 @@ def analyze_coin(symbol, session):
         final_rate = min(10.0, base_rate + whale_score_bonus)
 
         # Parameter Trade Scalping
-        entry_price = last_price * 1.001  # Slippage Binance/Bybit ~0.1%
+        entry_price = last_price * 1.001  # Slippage ~0.1%
         tp_percent = 3.0 if final_rate >= 8.0 else 2.0
         sl_percent = 1.0 if final_rate >= 8.0 else 1.5
 
@@ -190,17 +214,20 @@ def main():
     bybit_pairs = get_bybit_pairs(session)
     print(f"      Total pair Bybit terdeteksi: {len(bybit_pairs)}")
 
-    print("[2/4] Mengambil daftar pair USDT dari Binance...")
+    print("[2/4] Mengambil daftar pair USDT dari Binance Public Mirror...")
     all_binance_pairs = get_binance_usdt_pairs(session)
     print(f"      Total pair Binance terdeteksi: {len(all_binance_pairs)}")
 
-    # Jika Binance gagal karena isu jaringan IP GitHub runner, gunakan alternatif atau fallback
+    # Fallback ke Bybit jika Binance benar-benar terblokir total
     if not all_binance_pairs:
-        print("[WARN] Binance API tidak merespon/terblokir di runner ini. Menggunakan Bybit sebagai fallback...")
+        print("[WARN] Binance API terblokir di runner ini. Menggunakan daftar Bybit sebagai fallback...")
         if bybit_pairs:
             all_binance_pairs = [{"symbol": sym, "volume_usd": 0, "price_change": 0} for sym in bybit_pairs]
 
-    # Acak dan ambil maksimal 300 koin
+    if not all_binance_pairs:
+        print("[ERROR] Gagal mendapatkan data dari bursa manapun. Periksa jaringan IP runner.")
+        return
+
     random.shuffle(all_binance_pairs)
     scanned_pool = all_binance_pairs[:300]
     print(f"[3/4] Melakukan random sampling pada {len(scanned_pool)} koin...")
@@ -210,11 +237,8 @@ def main():
     
     for idx, coin in enumerate(scanned_pool):
         symbol = coin["symbol"]
-        
-        # Cross-check ketersediaan pair di Bybit (bila data tersedia)
         is_in_bybit = symbol in bybit_pairs if bybit_pairs else True
 
-        # Analisis Teknikal Scalping
         analysis = analyze_coin(symbol, session)
         if analysis:
             analysis["24h_vol_usd"] = coin["volume_usd"]
@@ -224,10 +248,8 @@ def main():
 
         time.sleep(0.05)
 
-    # Urutkan berdasarkan Rating tertinggi
     results = sorted(results, key=lambda x: x["rate"], reverse=True)
 
-    # --- REPORT PRINTING ---
     print("")
     print("="*85)
     print(f" HASIL LAPORAN SCOUTING SCALPING (Total Lolos Filter: {len(results)})")
