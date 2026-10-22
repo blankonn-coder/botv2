@@ -4,15 +4,22 @@ import requests
 import pandas as pd
 import ta
 
+# Standard User-Agent Header agar tidak diblokir/diberi halaman HTML Cloudflare oleh API
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 # --- 1. CONFIGURATION & FETCH PAIRS ---
 def get_bybit_pairs(session):
     url = "https://api.bybit.com/v5/market/tickers?category=spot"
     try:
-        resp = session.get(url, timeout=10).json()
-        if resp.get("retCode") == 0:
-            list_data = resp["result"]["list"]
-            symbols = [item["symbol"] for item in list_data if item["symbol"].endswith("USDT")]
-            return set(symbols)
+        resp = session.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and data.get("retCode") == 0:
+                list_data = data.get("result", {}).get("list", [])
+                symbols = [item["symbol"] for item in list_data if isinstance(item, dict) and item.get("symbol", "").endswith("USDT")]
+                return set(symbols)
     except Exception as e:
         print(f"[WARN] Gagal mengambil data Bybit: {e}")
     return set()
@@ -20,32 +27,34 @@ def get_bybit_pairs(session):
 def get_binance_usdt_pairs(session):
     url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
-        resp = session.get(url, timeout=10).json()
-        pairs = []
-        for item in resp:
-            symbol = item["symbol"]
-            # Ambil pair USDT, hindari leveraged/stablecoins
-            if symbol.endswith("USDT") and not any(x in symbol for x in ["UPUSDT", "DOWNUSDT", "BUSD", "FDUSD", "TUSD", "USDC"]):
-                pairs.append({
-                    "symbol": symbol,
-                    "volume_usd": float(item["quoteVolume"]),
-                    "price_change": float(item["priceChangePercent"])
-                })
-        return pairs
+        resp = session.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            pairs = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "symbol" in item:
+                        symbol = item["symbol"]
+                        if symbol.endswith("USDT") and not any(x in symbol for x in ["UPUSDT", "DOWNUSDT", "BUSD", "FDUSD", "TUSD", "USDC"]):
+                            pairs.append({
+                                "symbol": symbol,
+                                "volume_usd": float(item.get("quoteVolume", 0)),
+                                "price_change": float(item.get("priceChangePercent", 0))
+                            })
+                return pairs
     except Exception as e:
         print(f"[ERROR] Gagal mengambil data Binance Tickers: {e}")
-        return []
+    return []
 
 # --- 2. SCALPING TECHNICAL ANALYSIS & WHALE DETECTION ---
 def analyze_coin(symbol, session):
-    # Fetch 7 hari data kandel 15m -> 7 * 24 * 4 = 672 kandel (limit 700)
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=700"
     try:
-        resp = session.get(url, timeout=5)
+        resp = session.get(url, headers=HEADERS, timeout=5)
         if resp.status_code != 200:
             return None
         data = resp.json()
-        if len(data) < 200:
+        if not isinstance(data, list) or len(data) < 200:
             return None
         
         # Format Data Frame
@@ -184,6 +193,12 @@ def main():
     print("[2/4] Mengambil daftar pair USDT dari Binance...")
     all_binance_pairs = get_binance_usdt_pairs(session)
     print(f"      Total pair Binance terdeteksi: {len(all_binance_pairs)}")
+
+    # Jika Binance gagal karena isu jaringan IP GitHub runner, gunakan alternatif atau fallback
+    if not all_binance_pairs:
+        print("[WARN] Binance API tidak merespon/terblokir di runner ini. Menggunakan Bybit sebagai fallback...")
+        if bybit_pairs:
+            all_binance_pairs = [{"symbol": sym, "volume_usd": 0, "price_change": 0} for sym in bybit_pairs]
 
     # Acak dan ambil maksimal 300 koin
     random.shuffle(all_binance_pairs)
